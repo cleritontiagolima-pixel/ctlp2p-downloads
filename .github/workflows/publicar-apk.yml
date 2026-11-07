@@ -1,0 +1,56 @@
+name: Publicar APK na release
+
+# Anexa um APK ja compilado na release deste repositorio usando o proprio
+# GITHUB_TOKEN (sem token extra). O build continua sendo feito no repositorio
+# privado `iptv`; aqui so entra o arquivo pronto, informando uma URL de onde
+# baixa-lo.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Tag da release (ex.: v1.4.8)'
+        required: true
+      apk_url:
+        description: 'URL do APK (link direto ou pagina de hospedagem temporaria)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  publicar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Baixar o APK
+        env:
+          APK_URL: ${{ inputs.apk_url }}
+        run: |
+          set -euo pipefail
+          curl -sSL --max-time 600 "$APK_URL" -o /tmp/page.html
+          # hospedagens temporarias entregam uma pagina com link assinado
+          LINK=$(grep -oE 'https://tmpfiles\.org/dl/[^"]+' /tmp/page.html | head -1 || true)
+          if [ -z "${LINK:-}" ]; then LINK="$APK_URL"; fi
+          echo "baixando: $LINK"
+          curl -sSL --max-time 900 "$LINK" -o ctlp2p.apk
+          ls -l ctlp2p.apk
+          file ctlp2p.apk | grep -qiE 'android package|zip archive' \
+            || { echo 'o arquivo baixado nao e um APK'; exit 1; }
+          sha256sum ctlp2p.apk
+
+      - name: Anexar na release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VER: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if gh release view "$VER" > /dev/null 2>&1; then
+            gh release upload "$VER" ctlp2p.apk --clobber
+          else
+            gh release create "$VER" ctlp2p.apk \
+              --title "CTL P2P — APK para clientes" \
+              --notes "Aplicativo Android (APK) do app CTL P2P."
+          fi
+          gh release view "$VER" --json assets --jq '.assets[] | "\(.name) \(.size) bytes"'
