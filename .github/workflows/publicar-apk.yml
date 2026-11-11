@@ -1,11 +1,20 @@
 name: Publicar APK na release
 
-# Anexa um APK ja compilado na release deste repositorio usando o proprio
-# GITHUB_TOKEN (sem token extra). O build continua sendo feito no repositorio
-# privado `iptv`; aqui so entra o arquivo pronto, informando uma URL de onde
-# baixa-lo.
+# Anexa um APK ja compilado na release deste repositorio.
+#
+# Caminho automatico (usado pelo build): o workflow "APK Android" do repositorio
+# privado `iptv`, depois de assinar o APK, empurra o arquivo para a branch
+# `apk/<versao>` daqui usando uma deploy key. O push dispara este workflow, que
+# anexa o arquivo na release com o GITHUB_TOKEN deste repositorio e apaga a
+# branch temporaria. Nenhum link temporario e nenhum token extra entram no meio.
+#
+# Caminho manual (fallback): Actions -> "Publicar APK na release" -> Run workflow,
+# informando a versao e uma URL de onde baixar o APK.
 
 on:
+  push:
+    branches:
+      - 'apk/**'
   workflow_dispatch:
     inputs:
       version:
@@ -24,7 +33,12 @@ jobs:
     timeout-minutes: 15
 
     steps:
-      - name: Baixar o APK
+      # No caminho automatico o APK vem no proprio commit da branch `apk/<versao>`.
+      - uses: actions/checkout@v4
+        if: github.event_name == 'push'
+
+      - name: Baixar o APK da URL informada
+        if: github.event_name == 'workflow_dispatch'
         env:
           APK_URL: ${{ inputs.apk_url }}
         run: |
@@ -35,23 +49,42 @@ jobs:
           if [ -z "${LINK:-}" ]; then LINK="$APK_URL"; fi
           echo "baixando: $LINK"
           curl -sSL --max-time 900 "$LINK" -o ctlp2p.apk
+
+      - name: Conferir o APK
+        run: |
+          set -euo pipefail
           ls -l ctlp2p.apk
           file ctlp2p.apk | grep -qiE 'android package|zip archive' \
-            || { echo 'o arquivo baixado nao e um APK'; exit 1; }
+            || { echo 'o arquivo recebido nao e um APK'; exit 1; }
           sha256sum ctlp2p.apk
 
       - name: Anexar na release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
-          VER: ${{ inputs.version }}
+          VER: ${{ github.event_name == 'push' && github.ref_name || inputs.version }}
         run: |
           set -euo pipefail
+          VER="${VER#apk/}"
+          echo "release: $VER"
           if gh release view "$VER" > /dev/null 2>&1; then
             gh release upload "$VER" ctlp2p.apk --clobber
           else
             gh release create "$VER" ctlp2p.apk \
               --title "CTL P2P — APK para clientes" \
-              --notes "Aplicativo Android (APK) do app CTL P2P."
+              --notes "Aplicativo Android (APK) do app CTL P2P.
+
+          Instalação: baixe o arquivo .apk, abra no aparelho e autorize a instalação (\"fontes desconhecidas\").
+          Atualiza por cima da versão instalada (mesmo certificado), sem desinstalar."
           fi
-          gh release view "$VER" --json assets --jq '.assets[] | "\(.name) \(.size) bytes"'
+          gh release view "$VER" --json tagName,assets \
+            --jq '"\(.tagName): " + ([.assets[] | "\(.name) \(.size) bytes"] | join(", "))'
+
+      # O APK fica so na release; a branch existe apenas como transporte.
+      - name: Apagar a branch temporaria
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git push origin --delete "${GITHUB_REF_NAME}" || echo "branch ja removida"
